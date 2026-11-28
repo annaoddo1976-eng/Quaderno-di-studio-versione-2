@@ -4368,29 +4368,339 @@
       showToast('Backup esportato con successo');
     }
 
+    function htmlToPlainNoteText(val) {
+      if (val == null) return '';
+      const str = String(val);
+      if (!/[<>]|&[a-z#0-9]+;/i.test(str)) return str;
+      const tmp = document.createElement('div');
+      tmp.innerHTML = str
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/(p|div|li|h[1-6])>/gi, '\n');
+      return (tmp.textContent || tmp.innerText || '').replace(/\n{3,}/g, '\n\n').trim();
+    }
+
+    function extractLegacyNoteText(raw) {
+      if (!raw || typeof raw !== 'object') return '';
+      const candidates = [
+        raw.text, raw.content, raw.html, raw.htmlContent, raw.noteHtml,
+        raw.body, raw.note, raw.value, raw.rawText, raw.richContent,
+        raw.editorHtml, raw.paragraphText, raw.comment, raw.answer
+      ];
+      for (const c of candidates) {
+        if (typeof c === 'string' && c.trim()) {
+          return htmlToPlainNoteText(c);
+        }
+      }
+      if (Array.isArray(raw.paragraphs)) {
+        return raw.paragraphs.map(p => htmlToPlainNoteText(typeof p === 'string' ? p : (p?.text || p?.content || ''))).filter(Boolean).join('\n\n');
+      }
+      return '';
+    }
+
+    function extractLegacyLinkedPage(raw) {
+      if (!raw || typeof raw !== 'object') return null;
+      const val = raw.linkedPage ?? raw.pdfPage ?? raw.pageNumber ?? raw.page ?? raw.pdf_page ?? raw.pagina;
+      if (val === null || val === undefined || val === '') return null;
+      const num = parseInt(String(val).match(/\d+/)?.[0] || '', 10);
+      return isNaN(num) || num < 1 ? null : num;
+    }
+
+    function matchDefaultSessionId(idOrName) {
+      const norm = normalizeItalianStr(idOrName);
+      if (!norm) return null;
+      if (norm === 'sec wt' || norm.includes('torre')) return 'sec_wt';
+      if (norm === 'sec guida' || norm.includes('guida') || norm.includes('tesori') || norm.includes('vita cristiana')) return 'sec_guida';
+      if (norm === 'sec libro' || norm.includes('studio del libro') || norm.includes('studio biblico')) return 'sec_libro';
+      if (norm === 'sec jwb' || norm.includes('broadcasting') || norm.includes('adorazione mattutina')) return 'sec_jwb';
+      if (norm === 'sec ministero' || norm.includes('dimostrazioni') || norm.includes('ministero')) return 'sec_ministero';
+      if (norm === 'sec assemblee' || norm.includes('assemble') || norm.includes('congress')) return 'sec_assemblee';
+      if (norm === 'sec personale' || norm.includes('personale') || norm.includes('discorsi')) return 'sec_personale';
+      return null;
+    }
+
+    function normalizeImportedBackup(parsed) {
+      if (!parsed || typeof parsed !== 'object') return null;
+
+      // 1. Identify root container (supports current state, appState, data, or flat root)
+      const root = (parsed.state && typeof parsed.state === 'object')
+        ? parsed.state
+        : (parsed.appState && typeof parsed.appState === 'object')
+          ? parsed.appState
+          : (parsed.data && typeof parsed.data === 'object')
+            ? parsed.data
+            : parsed;
+
+      const hasKnownKeys = !!(
+        root.sessions || root.sessionData || root.savedScriptures || root.scriptures ||
+        root.scritture || root.bookmarks || root.segnalibri || root.calendarEvents ||
+        root.events || root.weeks || root.notes || parsed.sessions || parsed.notes
+      );
+      if (!hasKnownKeys) return null;
+
+      // 2. Fast path for current quaderno_studio.html format
+      if (Array.isArray(root.sessions) && root.sessionData && typeof root.sessionData === 'object') {
+        const nextState = {
+          sessions: root.sessions.length > 0 ? root.sessions : JSON.parse(JSON.stringify(DEFAULT_SESSIONS)),
+          sessionData: root.sessionData,
+          savedScriptures: Array.isArray(root.savedScriptures) ? root.savedScriptures : [],
+          bookmarks: Array.isArray(root.bookmarks) ? root.bookmarks : [],
+          calendarEvents: Array.isArray(root.calendarEvents) ? root.calendarEvents : [],
+          calendarNotebook: (root.calendarNotebook && Array.isArray(root.calendarNotebook.pages) && root.calendarNotebook.pages.length > 0)
+            ? root.calendarNotebook
+            : ensureCalendarNotebook(),
+          epubMeta: root.epubMeta || state.epubMeta,
+          homePrefs: root.homePrefs || state.homePrefs
+        };
+        let totalNotes = 0;
+        Object.values(nextState.sessionData).forEach(sd => {
+          if (sd && Array.isArray(sd.notes)) totalNotes += sd.notes.length;
+        });
+        return {
+          stateData: nextState,
+          summary: {
+            sessions: nextState.sessions.length,
+            notes: totalNotes,
+            scriptures: nextState.savedScriptures.length,
+            events: nextState.calendarEvents.length,
+            bookmarks: nextState.bookmarks.length
+          }
+        };
+      }
+
+      // 3. Legacy / universal format conversion (quaderno_anna, index.html, quaderno_v2, weeks)
+      const nextSessions = JSON.parse(JSON.stringify(DEFAULT_SESSIONS));
+      const nextSessionData = {};
+      const nextScriptures = [];
+      const nextBookmarks = [];
+      const nextEvents = [];
+
+      function getTargetSd(sid) {
+        if (!nextSessionData[sid]) {
+          nextSessionData[sid] = {
+            surface: null,
+            pdfFileId: null,
+            pdfFileName: '',
+            pdfLastPage: 1,
+            pdfAnnotations: {},
+            nbPages: 1,
+            nbLastPage: 1,
+            nbStrokes: {},
+            notes: [],
+            videoFileId: null,
+            videoFileName: '',
+            floatPdfs: []
+          };
+        }
+        return nextSessionData[sid];
+      }
+
+      function addNormalizedNote(sid, rawNote, fallbackIdx) {
+        if (!rawNote || typeof rawNote !== 'object') return;
+        const title = String(rawNote.title || rawNote.name || rawNote.label || `Nota ${fallbackIdx + 1}`).trim();
+        const text = extractLegacyNoteText(rawNote);
+        if (!title && !text && !rawNote.image) return;
+        const sd = getTargetSd(sid);
+        sd.notes.push({
+          id: rawNote.id || rawNote.noteId || uid('note'),
+          title: title || 'Nota',
+          text,
+          fontSize: Number(rawNote.fontSize) || 15,
+          bold: !!rawNote.bold,
+          linkedPage: extractLegacyLinkedPage(rawNote),
+          image: rawNote.image || rawNote.img || null,
+          collapsed: false
+        });
+      }
+
+      function addNormalizedScripture(rawSc) {
+        if (!rawSc || typeof rawSc !== 'object') return;
+        const ref = String(rawSc.ref || rawSc.reference || rawSc.riferimento || rawSc.title || '').trim();
+        const text = htmlToPlainNoteText(rawSc.text || rawSc.verseText || rawSc.content || '');
+        const comment = htmlToPlainNoteText(rawSc.comment || rawSc.note || rawSc.commento || '');
+        if (!ref && !text) return;
+        const exists = nextScriptures.some(s => s.ref.toLowerCase() === ref.toLowerCase() && s.text === text);
+        if (!exists) {
+          nextScriptures.push({
+            id: rawSc.id || uid('sc'),
+            ref: ref || 'Scrittura',
+            text,
+            comment,
+            createdAt: rawSc.createdAt || Date.now()
+          });
+        }
+      }
+
+      function resolveOrAddSession(rawSec, keyHint) {
+        const rawId = rawSec?.id || keyHint || '';
+        const rawName = rawSec?.name || rawSec?.title || rawSec?.label || keyHint || 'Sessione';
+        const matchedDefault = matchDefaultSessionId(rawId) || matchDefaultSessionId(rawName);
+        if (matchedDefault) return matchedDefault;
+
+        let existing = nextSessions.find(s => s.id === rawId || normalizeItalianStr(s.name) === normalizeItalianStr(rawName));
+        if (!existing) {
+          existing = {
+            id: rawId || uid('sec'),
+            name: String(rawName).trim() || 'Sessione',
+            subtitle: rawSec?.subtitle || 'Apri il tuo spazio di studio',
+            icon: rawSec?.icon || '📓',
+            defaultSurface: rawSec?.defaultSurface || 'notebook'
+          };
+          nextSessions.push(existing);
+        }
+        return existing.id;
+      }
+
+      // Extract sessions (array or map)
+      const rawSessions = root.sessions || parsed.sessions;
+      const sessionEntries = Array.isArray(rawSessions)
+        ? rawSessions.map((s, idx) => [s?.id || `s_${idx}`, s])
+        : (rawSessions && typeof rawSessions === 'object' ? Object.entries(rawSessions) : []);
+
+      sessionEntries.forEach(([sKey, sObj]) => {
+        if (!sObj || typeof sObj !== 'object') return;
+        const sid = resolveOrAddSession(sObj, sKey);
+        const sd = getTargetSd(sid);
+
+        const notesArr = Array.isArray(sObj.notes) ? sObj.notes
+          : (Array.isArray(sObj.customNotes) ? sObj.customNotes : []);
+        notesArr.forEach((n, i) => addNormalizedNote(sid, n, i));
+
+        if (Array.isArray(sObj.scriptures)) sObj.scriptures.forEach(addNormalizedScripture);
+        if (sObj.pdfAnnotations && typeof sObj.pdfAnnotations === 'object') sd.pdfAnnotations = sObj.pdfAnnotations;
+        if (sObj.nbStrokes && typeof sObj.nbStrokes === 'object') sd.nbStrokes = sObj.nbStrokes;
+        if (sObj.nbPages && Number(sObj.nbPages) > 0) sd.nbPages = Number(sObj.nbPages);
+      });
+
+      // Extract sessionData map if present separately
+      if (root.sessionData && typeof root.sessionData === 'object') {
+        Object.entries(root.sessionData).forEach(([sKey, sData]) => {
+          if (!sData || typeof sData !== 'object') return;
+          const sid = matchDefaultSessionId(sKey) || sKey;
+          const sd = getTargetSd(sid);
+          if (Array.isArray(sData.notes)) sData.notes.forEach((n, i) => addNormalizedNote(sid, n, i));
+          if (sData.pdfAnnotations) sd.pdfAnnotations = sData.pdfAnnotations;
+          if (sData.nbStrokes) sd.nbStrokes = sData.nbStrokes;
+          if (sData.nbPages) sd.nbPages = Math.max(sd.nbPages, Number(sData.nbPages) || 1);
+        });
+      }
+
+      // Extract weekly format (root.weeks)
+      if (root.weeks && typeof root.weeks === 'object') {
+        Object.values(root.weeks).forEach(wk => {
+          if (!wk || typeof wk !== 'object') return;
+          Object.entries(wk).forEach(([secKey, secVal]) => {
+            if (!secVal || typeof secVal !== 'object') return;
+            const sid = matchDefaultSessionId(secKey) || 'sec_personale';
+            const arr = Array.isArray(secVal.notes) ? secVal.notes
+              : (Array.isArray(secVal.customNotes) ? secVal.customNotes : []);
+            arr.forEach((n, i) => addNormalizedNote(sid, n, i));
+            if (Array.isArray(secVal.scriptures)) secVal.scriptures.forEach(addNormalizedScripture);
+          });
+        });
+      }
+
+      // Top-level standalone notes
+      const topNotes = root.notes || parsed.notes;
+      if (Array.isArray(topNotes)) {
+        topNotes.forEach((n, i) => {
+          const sid = matchDefaultSessionId(n?.sessionId || n?.section || '') || 'sec_personale';
+          addNormalizedNote(sid, n, i);
+        });
+      }
+
+      // Saved scriptures
+      const rawScriptures = root.savedScriptures || root.scriptures || root.scritture || parsed.savedScriptures || parsed.scriptures;
+      if (Array.isArray(rawScriptures)) rawScriptures.forEach(addNormalizedScripture);
+
+      // Bookmarks
+      const rawBookmarks = root.bookmarks || root.segnalibri || parsed.bookmarks;
+      if (Array.isArray(rawBookmarks)) {
+        rawBookmarks.forEach(b => {
+          if (!b || typeof b !== 'object') return;
+          nextBookmarks.push({
+            id: b.id || uid('bm'),
+            sessionId: matchDefaultSessionId(b.sessionId) || b.sessionId || 'sec_wt',
+            surface: b.surface === 'notebook' ? 'notebook' : 'pdf',
+            page: Number(b.page) || 1,
+            title: String(b.title || `Pagina ${b.page || 1}`),
+            createdAt: b.createdAt || Date.now()
+          });
+        });
+      }
+
+      // Calendar events
+      const rawEvents = root.calendarEvents || root.events || root.appuntamenti || parsed.calendarEvents;
+      if (Array.isArray(rawEvents)) {
+        rawEvents.forEach(ev => {
+          if (!ev || typeof ev !== 'object' || !ev.title) return;
+          nextEvents.push({
+            id: ev.id || uid('ev'),
+            title: String(ev.title),
+            date: ev.date || new Date().toISOString().slice(0, 10),
+            category: ev.category || 'Appuntamenti importanti',
+            startTime: ev.startTime || ev.time || '',
+            endTime: ev.endTime || '',
+            notes: ev.notes || ''
+          });
+        });
+      }
+
+      let totalNotes = 0;
+      Object.values(nextSessionData).forEach(sd => { totalNotes += sd.notes.length; });
+
+      return {
+        stateData: {
+          sessions: nextSessions,
+          sessionData: nextSessionData,
+          savedScriptures: nextScriptures,
+          bookmarks: nextBookmarks,
+          calendarEvents: nextEvents,
+          calendarNotebook: (root.calendarNotebook && Array.isArray(root.calendarNotebook.pages))
+            ? root.calendarNotebook
+            : ensureCalendarNotebook(),
+          epubMeta: root.epubMeta || state.epubMeta,
+          homePrefs: (root.homePrefs && typeof root.homePrefs === 'object') ? Object.assign({}, state.homePrefs, root.homePrefs) : state.homePrefs
+        },
+        summary: {
+          sessions: nextSessions.length,
+          notes: totalNotes,
+          scriptures: nextScriptures.length,
+          events: nextEvents.length,
+          bookmarks: nextBookmarks.length
+        }
+      };
+    }
+
     function importBackupJson(e) {
       const file = e.target.files[0];
       if (!file) return;
       const reader = new FileReader();
       reader.onload = () => {
         try {
-          const parsed = JSON.parse(reader.result);
-          if (!parsed || !parsed.state || !Array.isArray(parsed.state.sessions)) {
-            return showToast('File di backup non valido');
+          const cleanText = String(reader.result || '').replace(/^\uFEFF/, '').trim();
+          const parsed = JSON.parse(cleanText);
+          const normalized = normalizeImportedBackup(parsed);
+          if (!normalized) {
+            return showToast('File di backup non riconosciuto');
           }
+          const s = normalized.summary;
           confirmAction(
             'Ripristina backup',
-            'Vuoi sostituire i dati attuali con questo backup? (Consigliamo di esportare prima una copia dei dati attuali).',
+            `Trovati: ${s.sessions} sessioni, ${s.notes} note, ${s.scriptures} scritture, ${s.events} appuntamenti, ${s.bookmarks} segnalibri. Vuoi ripristinare questi dati nel quaderno?`,
             async () => {
-              state = Object.assign(state, parsed.state);
+              state = Object.assign(state, normalized.stateData);
+              ensureCalendarNotebook();
               await idbSet('appState', 'main', state);
               applyTheme();
               renderSavedScriptures();
+              renderHomeSummaryWidgets();
+              updateBottomNavActive('home');
               goHome();
-              showToast('Backup ripristinato con successo');
+              showToast(`Backup ripristinato (${s.notes} note, ${s.scriptures} scritture)`);
             }
           );
         } catch (err) {
+          console.error('Import backup error:', err);
           showToast('Errore nella lettura del file JSON');
         }
       };
