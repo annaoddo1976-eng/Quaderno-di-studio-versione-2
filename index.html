@@ -3714,6 +3714,44 @@
       );
     }
 
+    function handleCalendarDayClick(iso) {
+      const evs = state.calendarEvents.filter(e => e.date === iso);
+      if (evs.length > 0) {
+        openDayEventsModal(iso);
+      } else {
+        openEventModal(null, iso);
+      }
+    }
+
+    function openDayEventsModal(iso) {
+      const evs = state.calendarEvents
+        .filter(e => e.date === iso)
+        .sort((a, b) => (a.startTime || '').localeCompare(b.startTime || ''));
+
+      const listHtml = evs.length === 0
+        ? '<div class="text-xs text-[#6A5A78] text-center py-4">Nessun appuntamento per questa data.</div>'
+        : evs.map(ev => `
+            <div onclick="openEventModal('${ev.id}')" class="cursor-pointer p-3 rounded-xl border border-[#E5D9EC] bg-[#FAF8F3] hover:border-[#5B2C6F] transition">
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center gap-2 min-w-0">
+                  <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background:${CAT_COLORS[ev.category] || '#5B2C6F'}"></span>
+                  <span class="font-bold text-sm text-[#23192D] truncate">${escapeHtml(ev.title)}</span>
+                </div>
+                <span class="px-2 py-0.5 rounded-lg bg-white border border-[#E5D9EC] text-[11px] font-semibold text-[#5B2C6F] shrink-0">✏️ Modifica</span>
+              </div>
+              <div class="text-xs text-[#6A5A78] mt-1">${ev.startTime ? ev.startTime + (ev.endTime ? ' – ' + ev.endTime : '') + ' • ' : ''}${escapeHtml(ev.category)}</div>
+              ${ev.notes ? `<div class="text-xs text-[#6A5A78] mt-1 whitespace-pre-wrap">${escapeHtml(ev.notes)}</div>` : ''}
+            </div>
+          `).join('');
+
+      openModal(
+        `Appuntamenti del ${formatDateIT(iso)}`,
+        `<div class="space-y-2.5">${listHtml}</div>`,
+        `<button onclick="closeModal()" class="px-4 py-2 rounded-xl border border-[#E5D9EC] text-xs font-semibold">Chiudi</button>
+         <button onclick="openEventModal(null,'${iso}')" class="px-4 py-2 rounded-xl bg-[#5B2C6F] text-white text-xs font-semibold">+ Nuovo appuntamento</button>`
+      );
+    }
+
     function renderCalendar() {
       if (calMode === 'notebook') {
         renderCalNotebook();
@@ -3740,11 +3778,11 @@
           const evs = state.calendarEvents.filter(e => e.date === iso);
           const isToday = iso === todayIso;
           html += `
-            <div onclick="openEventModal(null,'${iso}')" class="cursor-pointer h-16 sm:h-20 p-1 rounded-xl border ${isToday ? 'border-[#5B2C6F] bg-[#F4E8F0]/60' : 'border-[#F1EAF5] bg-white'} hover:border-[#5B2C6F] flex flex-col overflow-hidden">
+            <div onclick="handleCalendarDayClick('${iso}')" class="cursor-pointer h-16 sm:h-20 p-1 rounded-xl border ${isToday ? 'border-[#5B2C6F] bg-[#F4E8F0]/60' : 'border-[#F1EAF5] bg-white'} hover:border-[#5B2C6F] flex flex-col overflow-hidden">
               <div class="text-xs font-bold ${isToday ? 'text-[#5B2C6F]' : 'text-[#23192D]'}">${d}</div>
               <div class="mt-0.5 space-y-0.5 overflow-hidden">
-                ${evs.slice(0, 2).map(ev => `<div class="text-[10px] px-1 rounded truncate text-white" style="background:${CAT_COLORS[ev.category] || '#5B2C6F'}">${escapeHtml(ev.title)}</div>`).join('')}
-                ${evs.length > 2 ? `<div class="text-[9px] text-[#6A5A78]">+${evs.length - 2}</div>` : ''}
+                ${evs.slice(0, 2).map(ev => `<div onclick="event.stopPropagation(); openEventModal('${ev.id}')" class="text-[10px] px-1 rounded truncate text-white hover:opacity-90" style="background:${CAT_COLORS[ev.category] || '#5B2C6F'}" title="${escapeHtml(ev.title)}">${escapeHtml(ev.title)}</div>`).join('')}
+                ${evs.length > 2 ? `<div class="text-[9px] text-[#6A5A78] font-semibold">+${evs.length - 2} altri</div>` : ''}
               </div>
             </div>
           `;
